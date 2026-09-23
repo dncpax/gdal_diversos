@@ -1,21 +1,21 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Default')]
 param (
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Default')]
     [string]$InputVrt,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Default')]
     [string]$OutputVrt,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
     [int]$TileCount = 4,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
     [double]$TargetRes = 1.0,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
     [int]$MaxCores = [Environment]::ProcessorCount,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
     [switch]$Help
 )
 
