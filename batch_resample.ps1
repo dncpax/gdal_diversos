@@ -15,6 +15,10 @@ param (
     [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
     [int]$MaxCores = [Environment]::ProcessorCount,
 
+    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [ValidateSet('Auto', 'Horizontal', 'Vertical')]
+    [string]$TileOrientation = 'Auto',
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
     [switch]$Help
 )
@@ -45,7 +49,7 @@ Description:
   since it requires resampling the tile's own pixel data at every zoom level.
 
 Usage:
-  .\resample_mosaic.ps1 -InputVrt <path> -OutputVrt <path> -TileCount <int> -TargetRes <double> -MaxCores <int>
+  .\resample_mosaic.ps1 -InputVrt <path> -OutputVrt <path> -TileCount <int> -TargetRes <double> -MaxCores <int> -TileOrientation <Auto|Horizontal|Vertical>
 
 Parameters:
   -InputVrt   Path to the input VRT file (required)
@@ -53,6 +57,8 @@ Parameters:
   -TileCount  Number of parallel spatial tiles to generate (default: 4)
   -TargetRes  Output pixel resolution (default: 1.0)
   -MaxCores   Total CPU cores allocated to the processing pool (default: all logical processors detected)
+  -TileOrientation  Axis to split tiles along: Auto, Horizontal or Vertical (default: Auto - picks
+                    whichever axis has more BlockSize units available)
   -Help       Show this help message
 
 Example:
@@ -329,14 +335,28 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-# Internal row boundaries are snapped to the nearest multiple of BlockSize so adjacent tile
-# jobs never need to decode the same straddling source block twice.
-$RowBoundaries = New-Object 'object[]' ($TileCount + 1)
-$RowBoundaries[0] = 0
-$RowBoundaries[$TileCount] = $ReadHeight
+$SplitAxis = switch ($TileOrientation) {
+    'Horizontal' { 'Y' }
+    'Vertical'   { 'X' }
+    default {
+        # Auto: split along whichever axis has more BlockSize units available, so tiles stay
+        # closer to square and TileCount isn't needlessly capped by the shorter dimension.
+        $WidthUnits = [Math]::Floor($ReadWidth / $BlockSize)
+        $HeightUnits = [Math]::Floor($ReadHeight / $BlockSize)
+        if ($WidthUnits -gt $HeightUnits) { 'X' } else { 'Y' }
+    }
+}
+$SplitLength = if ($SplitAxis -eq 'X') { $ReadWidth } else { $ReadHeight }
+Write-Host "Splitting along the $SplitAxis axis ($SplitLength px, BlockSize=$BlockSize, TileOrientation=$TileOrientation)" -ForegroundColor Cyan
+
+# Internal boundaries are snapped to the nearest multiple of BlockSize so adjacent tile jobs
+# never need to decode the same straddling source block twice.
+$SplitBoundaries = New-Object 'object[]' ($TileCount + 1)
+$SplitBoundaries[0] = 0
+$SplitBoundaries[$TileCount] = $SplitLength
 for ($k = 1; $k -lt $TileCount; $k++) {
-    $Raw = ($k * $ReadHeight) / $TileCount
-    $RowBoundaries[$k] = [int]([Math]::Round($Raw / $BlockSize) * $BlockSize)
+    $Raw = ($k * $SplitLength) / $TileCount
+    $SplitBoundaries[$k] = [int]([Math]::Round($Raw / $BlockSize) * $BlockSize)
 }
 
 $OutputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($OutputVrt)
@@ -345,21 +365,33 @@ $TileDefs = @()
 $GeneratedTiles = @()
 
 for ($i = 0; $i -lt $TileCount; $i++) {
-    $TileRowStart = [int]$RowBoundaries[$i]
-    $TileRowEnd = [int]$RowBoundaries[$i + 1]
+    $TileStart = [int]$SplitBoundaries[$i]
+    $TileEnd = [int]$SplitBoundaries[$i + 1]
 
-    if ($TileRowEnd -le $TileRowStart) {
-        throw "Tile partitioning produced a zero-height tile at index $i after block alignment. Reduce TileCount or check BlockSize ($BlockSize)."
+    if ($TileEnd -le $TileStart) {
+        throw "Tile partitioning produced a zero-size tile at index $i after block alignment. Reduce TileCount or check BlockSize ($BlockSize)."
     }
 
     $TileFile = Join-Path $OutputDir "${OutputBaseName}_Tile_$($i + 1).tif"
 
+    if ($SplitAxis -eq 'X') {
+        $Xoff = $TileStart
+        $Yoff = 0
+        $Xsize = $TileEnd - $TileStart
+        $Ysize = $ReadHeight
+    } else {
+        $Xoff = 0
+        $Yoff = $TileStart
+        $Xsize = $ReadWidth
+        $Ysize = $TileEnd - $TileStart
+    }
+
     $TileDefs += [pscustomobject]@{
         Tile  = $TileFile
-        Xoff  = 0
-        Yoff  = $TileRowStart
-        Xsize = $ReadWidth
-        Ysize = ($TileRowEnd - $TileRowStart)
+        Xoff  = $Xoff
+        Yoff  = $Yoff
+        Xsize = $Xsize
+        Ysize = $Ysize
     }
     $GeneratedTiles += $TileFile
 }
