@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $false)]
-    [string]$InputVrt = "C:\Temp\trabalhos\ortos2025\mosaic.vrt",
+    [Parameter(Mandatory = $true)]
+    [string]$InputVrt,
 
-    [Parameter(Mandatory = $false)]
-    [string]$OutputVrt = "C:\Temp\trabalhos\ortos2025\resampled_final.vrt",
+    [Parameter(Mandatory = $true)]
+    [string]$OutputVrt,
 
     [Parameter(Mandatory = $false)]
     [int]$TileCount = 4,
@@ -28,14 +28,15 @@ Description:
   (compression, quality, block size, photometric) are inherited from the first source
   raster referenced by the input VRT. The objective is to use the Fast-Path: copy from 
   the nearest overview level present in the original vrt, and also avoid recalculations 
-  as much as possible - that's why we use the same image params as the originals.
+  as much as possible - that's why we use the same image params as the originals. 
+  Overviews are still recalculated and are the slowest part of the process.
 
 Usage:
   .\resample_mosaic.ps1 -InputVrt <path> -OutputVrt <path> -TileCount <int> -TargetRes <double> -MaxCores <int>
 
 Parameters:
-  -InputVrt   Path to the input VRT file (default: C:\Temp\trabalhos\ortos2025\mosaic.vrt)
-  -OutputVrt  Path for the final output VRT (default: C:\Temp\trabalhos\ortos2025\resampled_final.vrt)
+  -InputVrt   Path to the input VRT file (required)
+  -OutputVrt  Path for the final output VRT (required)
   -TileCount  Number of parallel spatial tiles to generate (default: 4)
   -TargetRes  Output pixel resolution (default: 1.0)
   -MaxCores   Total CPU cores allocated to the processing pool (default: all logical processors detected)
