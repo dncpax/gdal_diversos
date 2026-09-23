@@ -22,14 +22,27 @@ param (
 if ($Help) {
     Write-Host @"
 Description:
-  Resamples a large raster mosaic (VRT) to a target pixel resolution by splitting it
-  into row-based tiles, resampling each tile to COG in parallel using GDAL, and then
-  rebuilding a single final VRT from the resulting tiles. COG creation options
-  (compression, quality, block size, photometric) are inherited from the first source
-  raster referenced by the input VRT. The objective is to use the Fast-Path: copy from 
-  the nearest overview level present in the original vrt, and also avoid recalculations 
-  as much as possible - that's why we use the same image params as the originals. 
-  Overviews are still recalculated and are the slowest part of the process.
+  Produces a resampled COG mosaic at TargetRes from a large raster mosaic (VRT) as
+  cheaply as possible, by splitting the work into row-based tiles processed in
+  parallel with GDAL.
+
+  The goal is to avoid decoding full-resolution pixels whenever possible: for each
+  tile, the script looks at the source's existing overview levels and opens the one
+  whose resolution is closest to (but not coarser than) TargetRes via
+  -oo OVERVIEW_LEVEL, then reads from it using a pixel-space -srcwin instead of a
+  georeferenced -projwin (no coordinate round-trip, no rounding risk). Row
+  boundaries between tiles are snapped to the inherited block size so two parallel
+  tile jobs never decode the same straddling source block twice. If the selected
+  overview's native resolution already matches TargetRes closely enough, no
+  resampling is applied at all - the tile is a straight pixel copy. Otherwise, a
+  light resample still runs, but only over the already-downsampled overview data,
+  never over the full-resolution source.
+
+  Output COG creation options (compression, quality, block size, photometric) are
+  inherited from the first source raster referenced by the input VRT, to avoid an
+  unnecessary format conversion on top of the resample. Each output tile still
+  builds its own overview pyramid (-ovr AUTO), which remains the slowest step
+  since it requires resampling the tile's own pixel data at every zoom level.
 
 Usage:
   .\resample_mosaic.ps1 -InputVrt <path> -OutputVrt <path> -TileCount <int> -TargetRes <double> -MaxCores <int>
@@ -131,7 +144,7 @@ function Get-JsonValueCaseInsensitive {
 $ThreadsPerTile = [Math]::Max(1, [Math]::Floor($MaxCores / $TileCount))
 Write-Host "System Cores Allocated: $MaxCores | Concurrent Tiles: $TileCount | Threads/Tile: $ThreadsPerTile" -ForegroundColor Cyan
 
-Write-Host "Extracting extent and pixel grid from $InputVrt..." -ForegroundColor Cyan
+Write-Host "Extracting geotransform and pixel grid from $InputVrt..." -ForegroundColor Cyan
 if (-not [System.IO.Path]::IsPathRooted($InputVrt)) {
     $InputVrt = (Resolve-Path -LiteralPath $InputVrt).Path
 }
@@ -256,8 +269,6 @@ if (-not $GeoTransform -or $GeoTransform.Count -lt 6) {
     throw "The input VRT does not expose a valid geotransform: $InputVrt"
 }
 
-$OriginX = [double]$GeoTransform[0]
-$OriginY = [double]$GeoTransform[3]
 $PixelWidth = [double]$GeoTransform[1]
 $PixelHeight = [double]$GeoTransform[5]
 $SourceWidth = [int]$InfoJson.size[0]
@@ -267,10 +278,50 @@ if ($PixelWidth -le 0 -or $PixelHeight -eq 0) {
     throw "Invalid pixel size in source VRT geotransform: pixel width=$PixelWidth, pixel height=$PixelHeight"
 }
 
-$XMin = $OriginX
-$XMax = $OriginX + ($SourceWidth * $PixelWidth)
-$YMin = $OriginY + ($SourceHeight * $PixelHeight)
-$YMax = $OriginY
+# Pick the source overview level closest to (but not coarser than) TargetRes, so tiles are
+# read from already-decimated pixels via -oo OVERVIEW_LEVEL instead of full resolution.
+$OverviewLevel = $null
+$ReadWidth = $SourceWidth
+$ReadHeight = $SourceHeight
+$ReadPixelWidth = $PixelWidth
+
+$SourceOverviews = @()
+if ($SourceInfo.ContainsKey('bands') -and $SourceInfo['bands']) {
+    foreach ($band in @($SourceInfo['bands'])) {
+        if ($band.ContainsKey('overviews') -and $band['overviews']) {
+            $SourceOverviews = @($band['overviews'])
+            break
+        }
+    }
+}
+
+$SourceFullWidth = [double]$SourceInfo.size[0]
+$BestRatio = $null
+for ($idx = 0; $idx -lt $SourceOverviews.Count; $idx++) {
+    $OvWidth = [double]$SourceOverviews[$idx]['size'][0]
+    if ($OvWidth -le 0) { continue }
+    $Ratio = $SourceFullWidth / $OvWidth
+    $OvResX = [Math]::Abs($PixelWidth) * $Ratio
+    if ($OvResX -le $TargetRes -and (-not $BestRatio -or $Ratio -gt $BestRatio)) {
+        $BestRatio = $Ratio
+        $OverviewLevel = $idx
+    }
+}
+
+if ($null -ne $OverviewLevel) {
+    $ReadWidth = [Math]::Round($SourceWidth / $BestRatio)
+    $ReadHeight = [Math]::Round($SourceHeight / $BestRatio)
+    $ReadPixelWidth = $PixelWidth * $BestRatio
+    Write-Host "Selected source overview level $OverviewLevel (~$([Math]::Round($ReadPixelWidth, 4)) units/px) as read source for TargetRes=$TargetRes" -ForegroundColor Cyan
+} else {
+    Write-Host "No source overview is fine enough to cover TargetRes=$TargetRes; reading full resolution." -ForegroundColor Yellow
+}
+
+$ResTolerance = 0.001
+$NeedsResample = [Math]::Abs($ReadPixelWidth - $TargetRes) -gt ($TargetRes * $ResTolerance)
+if (-not $NeedsResample) {
+    Write-Host "Read resolution already matches TargetRes within tolerance; skipping resample (straight pixel copy)." -ForegroundColor Cyan
+}
 
 $OutputDir = Split-Path -Path $OutputVrt -Parent
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -278,27 +329,35 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+# Internal row boundaries are snapped to the nearest multiple of BlockSize so adjacent tile
+# jobs never need to decode the same straddling source block twice.
+$RowBoundaries = New-Object 'object[]' ($TileCount + 1)
+$RowBoundaries[0] = 0
+$RowBoundaries[$TileCount] = $ReadHeight
+for ($k = 1; $k -lt $TileCount; $k++) {
+    $Raw = ($k * $ReadHeight) / $TileCount
+    $RowBoundaries[$k] = [int]([Math]::Round($Raw / $BlockSize) * $BlockSize)
+}
+
 $TileDefs = @()
 $GeneratedTiles = @()
 
 for ($i = 0; $i -lt $TileCount; $i++) {
-    $TileRowStart = [Math]::Floor(($i * $SourceHeight) / $TileCount)
-    $TileRowEnd = if ($i -eq ($TileCount - 1)) { $SourceHeight } else { [Math]::Floor((($i + 1) * $SourceHeight) / $TileCount) }
+    $TileRowStart = [int]$RowBoundaries[$i]
+    $TileRowEnd = [int]$RowBoundaries[$i + 1]
 
     if ($TileRowEnd -le $TileRowStart) {
-        throw "Tile partitioning produced a zero-height tile at index $i. Reduce TileCount or check raster size."
+        throw "Tile partitioning produced a zero-height tile at index $i after block alignment. Reduce TileCount or check BlockSize ($BlockSize)."
     }
 
-    $TileYUpper = $OriginY + ($TileRowStart * $PixelHeight)
-    $TileYLower = $OriginY + ($TileRowEnd * $PixelHeight)
     $TileFile = Join-Path $OutputDir "tile_$($i + 1).tif"
 
     $TileDefs += [pscustomobject]@{
-        Tile = $TileFile
-        Ulx = $XMin
-        Uly = $TileYUpper
-        Lrx = $XMax
-        Lry = $TileYLower
+        Tile  = $TileFile
+        Xoff  = 0
+        Yoff  = $TileRowStart
+        Xsize = $ReadWidth
+        Ysize = ($TileRowEnd - $TileRowStart)
     }
     $GeneratedTiles += $TileFile
 }
@@ -307,17 +366,20 @@ Write-Host "Processing $TileCount tiles concurrently..." -ForegroundColor Cyan
 
 $Jobs = foreach ($Box in $TileDefs) {
     Start-ThreadJob -ScriptBlock {
-        param($Vrt, $Tile, $Ulx, $Uly, $Lrx, $Lry, $Res, $Compression, $BlockSize, $Quality, $Threads)
+        param($Vrt, $Tile, $Xoff, $Yoff, $Xsize, $Ysize, $OverviewLevel, $NeedsResample, $Res, $Compression, $BlockSize, $Quality, $Threads)
 
-        $tileargs = @(
-            '--config', 'GDAL_NUM_THREADS', "$Threads",
+        $tileargs = @('--config', 'GDAL_NUM_THREADS', "$Threads")
+
+        if ($null -ne $OverviewLevel) {
+            $tileargs += @('-oo', "OVERVIEW_LEVEL=$OverviewLevel")
+        }
+
+        $tileargs += @(
             '-of', 'COG',
             '-b', '1',
             '-b', '2',
             '-b', '3',
-            '-tr', [string]$Res, [string]$Res,
-            '-projwin', [string]$Ulx, [string]$Uly, [string]$Lrx, [string]$Lry,
-            '-r', 'average',
+            '-srcwin', [string]$Xoff, [string]$Yoff, [string]$Xsize, [string]$Ysize,
             '-co', "COMPRESS=$Compression",
             '-co', "BLOCKSIZE=$BlockSize",
             '-co', "OVERVIEW_COMPRESS=$Compression",
@@ -325,6 +387,10 @@ $Jobs = foreach ($Box in $TileDefs) {
             '-co', 'BIGTIFF=YES',
             '-ovr', 'AUTO'
         )
+
+        if ($NeedsResample) {
+            $tileargs += @('-tr', [string]$Res, [string]$Res, '-r', 'average')
+        }
 
         if ($Quality) {
             $tileargs += @('-co', "QUALITY=$Quality")
@@ -338,7 +404,7 @@ $Jobs = foreach ($Box in $TileDefs) {
             throw "gdal_translate failed for $Tile (exit code $LASTEXITCODE)"
         }
         Write-Host "[OK] Tile generated: $Tile" -ForegroundColor Green
-    } -ArgumentList $InputVrt, $Box.Tile, $Box.Ulx, $Box.Uly, $Box.Lrx, $Box.Lry, $TargetRes, $Compression, $BlockSize, $Quality, $ThreadsPerTile
+    } -ArgumentList $InputVrt, $Box.Tile, $Box.Xoff, $Box.Yoff, $Box.Xsize, $Box.Ysize, $OverviewLevel, $NeedsResample, $TargetRes, $Compression, $BlockSize, $Quality, $ThreadsPerTile
 }
 
 $Jobs | Receive-Job -Wait -AutoRemoveJob
