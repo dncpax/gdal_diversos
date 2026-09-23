@@ -339,6 +339,8 @@ for ($k = 1; $k -lt $TileCount; $k++) {
     $RowBoundaries[$k] = [int]([Math]::Round($Raw / $BlockSize) * $BlockSize)
 }
 
+$OutputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($OutputVrt)
+
 $TileDefs = @()
 $GeneratedTiles = @()
 
@@ -350,7 +352,7 @@ for ($i = 0; $i -lt $TileCount; $i++) {
         throw "Tile partitioning produced a zero-height tile at index $i after block alignment. Reduce TileCount or check BlockSize ($BlockSize)."
     }
 
-    $TileFile = Join-Path $OutputDir "tile_$($i + 1).tif"
+    $TileFile = Join-Path $OutputDir "${OutputBaseName}_Tile_$($i + 1).tif"
 
     $TileDefs += [pscustomobject]@{
         Tile  = $TileFile
