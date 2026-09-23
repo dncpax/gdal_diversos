@@ -13,7 +13,7 @@ param (
     [double]$TargetRes = 1.0,
 
     [Parameter(Mandatory = $false)]
-    [int]$MaxCores = 8,
+    [int]$MaxCores = [Environment]::ProcessorCount,
 
     [Parameter(Mandatory = $false)]
     [switch]$Help
@@ -29,7 +29,7 @@ Parameters:
   -OutputVrt  Path for the final output VRT (default: C:\Temp\trabalhos\ortos2025\resampled_final.vrt)
   -TileCount  Number of parallel spatial tiles to generate (default: 4)
   -TargetRes  Output pixel resolution (default: 1.0)
-  -MaxCores   Total CPU cores allocated to the processing pool (default: 8)
+  -MaxCores   Total CPU cores allocated to the processing pool (default: all logical processors detected)
   -Help       Show this help message
 
 Example:
@@ -297,9 +297,10 @@ Write-Host "Processing $TileCount tiles concurrently..." -ForegroundColor Cyan
 
 $Jobs = foreach ($Box in $TileDefs) {
     Start-ThreadJob -ScriptBlock {
-        param($Vrt, $Tile, $Ulx, $Uly, $Lrx, $Lry, $Res, $Compression, $BlockSize, $Quality)
+        param($Vrt, $Tile, $Ulx, $Uly, $Lrx, $Lry, $Res, $Compression, $BlockSize, $Quality, $Threads)
 
         $tileargs = @(
+            '--config', 'GDAL_NUM_THREADS', "$Threads",
             '-of', 'COG',
             '-b', '1',
             '-b', '2',
@@ -310,6 +311,7 @@ $Jobs = foreach ($Box in $TileDefs) {
             '-co', "COMPRESS=$Compression",
             '-co', "BLOCKSIZE=$BlockSize",
             '-co', "OVERVIEW_COMPRESS=$Compression",
+            '-co', "NUM_THREADS=$Threads",
             '-co', 'BIGTIFF=YES',
             '-ovr', 'AUTO'
         )
@@ -326,7 +328,7 @@ $Jobs = foreach ($Box in $TileDefs) {
             throw "gdal_translate failed for $Tile (exit code $LASTEXITCODE)"
         }
         Write-Host "[OK] Tile generated: $Tile" -ForegroundColor Green
-    } -ArgumentList $InputVrt, $Box.Tile, $Box.Ulx, $Box.Uly, $Box.Lrx, $Box.Lry, $TargetRes, $Compression, $BlockSize, $Quality
+    } -ArgumentList $InputVrt, $Box.Tile, $Box.Ulx, $Box.Uly, $Box.Lrx, $Box.Lry, $TargetRes, $Compression, $BlockSize, $Quality, $ThreadsPerTile
 }
 
 $Jobs | Receive-Job -Wait -AutoRemoveJob
