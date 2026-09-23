@@ -30,10 +30,15 @@ if ($Help) {
     Write-Host @"
 Description:
   Produces a resampled COG mosaic at TargetRes from a large raster mosaic (VRT) as
-  cheaply as possible, by splitting the work into row-based tiles processed in
-  parallel with GDAL.
+  cheaply as possible, by splitting the work into row/column-based tiles processed in
+  parallel with GDAL. Performance gains in our tests were commonly around 50% faster 
+  than a single-threaded gdal_translate, and sometimes up to 10x faster on large
+  collections of source rasters. Since gdal_translate does not support multithreading, 
+  this script is a workaround that splits the writing into multiple tiles, each of which 
+  is processed in parallel by a separate gdal_translate job. Finally, the tiles are merged
+  into a single VRT (or optionally materialized into a single physical COG).
 
-  The goal is to avoid decoding full-resolution pixels whenever possible: for each
+  The 2nd goal is to avoid decoding full-resolution pixels whenever possible: for each
   tile, the script looks at the source's existing overview levels and opens the one
   whose resolution is closest to (but not coarser than) TargetRes via
   -oo OVERVIEW_LEVEL, then reads from it using a pixel-space -srcwin instead of a
