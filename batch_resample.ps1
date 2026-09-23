@@ -1,32 +1,32 @@
-[CmdletBinding(DefaultParameterSetName = 'Default')]
+[CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [string]$InputVrt,
 
-    [Parameter(Mandatory = $true, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [string]$OutputVrt,
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [int]$TileCount = 4,
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [double]$TargetRes = 1.0,
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [int]$MaxCores = [Environment]::ProcessorCount,
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [ValidateSet('Auto', 'Horizontal', 'Vertical')]
     [string]$TileOrientation = 'Auto',
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [Parameter(Mandatory = $false)]
     [switch]$MaterializeMosaic,
 
-    [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
+    [Parameter(Mandatory = $false)]
     [switch]$Help
 )
 
-if ($Help) {
+if ($Help -or $PSBoundParameters.Count -eq 0) {
     Write-Host @"
 Description:
   Produces a resampled COG mosaic at TargetRes from a large raster mosaic (VRT) as
@@ -75,6 +75,10 @@ Example:
   .\resample_mosaic.ps1 -InputVrt input.vrt -OutputVrt output.vrt -TileCount 4 -TargetRes 1.0 -MaxCores 16
 "@ -ForegroundColor Yellow
     exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($InputVrt) -or [string]::IsNullOrWhiteSpace($OutputVrt)) {
+    throw "-InputVrt and -OutputVrt are required. Run with -Help for usage."
 }
 
 if (-not (Test-Path -LiteralPath $InputVrt -PathType Leaf)) {
