@@ -21,6 +21,15 @@ param (
 
 if ($Help) {
     Write-Host @"
+Description:
+  Resamples a large raster mosaic (VRT) to a target pixel resolution by splitting it
+  into row-based tiles, resampling each tile to COG in parallel using GDAL, and then
+  rebuilding a single final VRT from the resulting tiles. COG creation options
+  (compression, quality, block size, photometric) are inherited from the first source
+  raster referenced by the input VRT. The objective is to use the Fast-Path: copy from 
+  the nearest overview level present in the original vrt, and also avoid recalculations 
+  as much as possible - that's why we use the same image params as the originals.
+
 Usage:
   .\resample_mosaic.ps1 -InputVrt <path> -OutputVrt <path> -TileCount <int> -TargetRes <double> -MaxCores <int>
 
