@@ -19,6 +19,9 @@ param (
     [ValidateSet('Auto', 'Horizontal', 'Vertical')]
     [string]$TileOrientation = 'Auto',
 
+    [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+    [switch]$MaterializeMosaic,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Help')]
     [switch]$Help
 )
@@ -59,6 +62,8 @@ Parameters:
   -MaxCores   Total CPU cores allocated to the processing pool (default: all logical processors detected)
   -TileOrientation  Axis to split tiles along: Auto, Horizontal or Vertical (default: Auto - picks
                     whichever axis has more BlockSize units available)
+  -MaterializeMosaic  Also merge the tiles into a single physical COG (<OutputVrt> with a .tif
+                      extension), in addition to the lightweight VRT (default: false)
   -Help       Show this help message
 
 Example:
@@ -453,5 +458,34 @@ if ($LASTEXITCODE -ne 0) {
     throw "gdalbuildvrt failed (exit code $LASTEXITCODE)"
 }
 Write-Host "[OK] Final VRT generated: $OutputVrt" -ForegroundColor Green
+
+if ($MaterializeMosaic) {
+    $FinalMosaic = [System.IO.Path]::ChangeExtension($OutputVrt, '.tif')
+    Write-Host "Materializing final mosaic: $FinalMosaic..." -ForegroundColor Cyan
+
+    $mergeArgs = @(
+        '--config', 'GDAL_NUM_THREADS', "$MaxCores",
+        '-of', 'COG',
+        '-co', "COMPRESS=$Compression",
+        '-co', "BLOCKSIZE=$BlockSize",
+        '-co', "OVERVIEW_COMPRESS=$Compression",
+        '-co', "NUM_THREADS=$MaxCores",
+        '-co', 'BIGTIFF=YES',
+        '-ovr', 'AUTO'
+    )
+
+    if ($Quality) {
+        $mergeArgs += @('-co', "QUALITY=$Quality")
+    }
+
+    $mergeArgs += @($OutputVrt, $FinalMosaic)
+
+    Write-Host "[COMMAND] gdal_translate $($mergeArgs -join ' ')" -ForegroundColor DarkCyan
+    & gdal_translate @mergeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "gdal_translate failed to materialize final mosaic (exit code $LASTEXITCODE)"
+    }
+    Write-Host "[OK] Final mosaic generated: $FinalMosaic" -ForegroundColor Green
+}
 
 Write-Host "Done! Generated $OutputVrt using $TileCount tiles." -ForegroundColor Green
